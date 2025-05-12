@@ -119,3 +119,117 @@ InnoDB是索引组织表，数据段就是B+数的叶子节点，索引段即为
 > Serializable：快照读会退化为当前读。
 
 ### MVCC-隐藏字段
+mysql在创建表的时候，隐式创建的三个隐藏字段。
+
+![img_10.png](img_10.png)
+
+> 记录中的隐藏字段
+>> 1、DB_TRX_Id：最近修改事务ID，记录插入这条记录或最后一次修改该记录的事务ID
+> 
+>> 2、DB_ROLL_PTR：回滚指针，指向这条记录的上一个版本，用于配合undo log，指向上一个版本。
+> 
+>> 3、DB_ROW_ID：隐藏主键，如果表结构没有指定主键，将会生成该字段
+
+### MVCC-undo log 版本链
+> undo log，回滚日志，在insert、update、delete的时候产生的便于回滚的日志。   
+> 当insert的时候，产生的undo log日志只在回滚时需要，在事务提交后，可被立即删除。    
+> 而update、delet的时候，产生的undo log日志不仅在回滚时需要，在快照读时也需要，不会立即被删除。     
+
+**_undolog 版本链_**
+
+一下用图文形式展示：
+
+1、首先表中存在一条记录，此时的表记录如下
+
+![img_11.png](img_11.png)
+
+2、此时该表按照一下几个事务进行操作
+
+![img_12.png](img_12.png)
+
+3、事务2开启时，表记录和undolog日志的变化，如下下图：
+
+![img_13.png](img_13.png)  
+
+4、事务2，执行修改id为30记录中的age为3时，undolog日志的变化和表记录的变化如下：
+
+![img_16.png](img_16.png)
+
+5、开始事务3时
+
+![img_14.png](img_14.png)
+
+6、事务4
+
+![img_15.png](img_15.png)
+
+> 由此可见，undo log 版本链，是不同事务或相同事务对同一条记录进行修改，会导致该记录的undo log生成一条记录版本链表，链表的头部是最新的旧纪录，链表尾部是最早的旧纪录。   
+
+### readView
+> readView，读视图是快照读SQL执行时MVCC提取数据的依据，记录并维护系统当前活跃的事务(未提交)id。
+> 
+> ReadView是事务开启时，当前所有活跃事务（还未提交的事务）的一个集合，ReadView数据结构决定了不同事务隔离级别下，数据的可见性。
+> 
+> readView中包含了四个核心字段：
+> 
+>> **_m_ids_**：当前活跃的事务ID集合
+> 
+>> **_min_trx_id_**：最小活跃事务ID
+> 
+>> **_max_trx_id_**：预分配事务ID，当前最大事务ID+1(因为事务ID是自增的)
+> 
+>> **_creator_trx_id_**：ReadView创建者的事务ID
+
+readview，版本链数据访问规则：
+
+![img_17.png](img_17.png)
+
+> 不同的隔离级别，生成Readview的时机不同：
+>> Read Committed：在事务中每一次执行快照读时生成Readview。
+> 
+>> Repeatable Read：在事务中第一次执行快照读时生成Readview,后续复用该Readview。
+
+### RC级别
+Read Committed隔离级别下，每次select，执行快照读时生成一个新的Readview。(这也导致可能存在不可重复和幻读，因为每次select的快照读都不一致，得到的结果可能也就不一样了)
+
+执行流程：
+
+![img_19.png](img_19.png)
+
+按照上述2~4事务执行完之后，undu log产生的版本链如下：
+
+![img_23.png](img_23.png)
+
+1、当事务5执行第一次快照读的时候，得到的readview如下：
+
+![img_20.png](img_20.png)
+
+由上面的undo log的版本链可知  
+当前记录标记的是trx_id(事务id)=4，根据版本链的访问规则:  
+此时：trx_id=4,creator_trx_id=5,min_trx_id=3,max_trx_id=6,m_ids={3,4,5}    
+**第一条**：trx_id==creator_trx_id不成立，    
+**第二条**：trx_id<min_trx_id不成立，    
+**第三条**：trx_id>max_trx_id=不成立，    
+**第四条**：min_trx_id<trx_id<max_trx_id,但max_trx_id存在m_ids中,不成立。   
+根据上述四条规则都不存在成立的，所以不返回当前undo log中版本trx_id=4的记录    
+此时根据undo log 中的版本链，找到上一个版本，在进行上述的判断。   
+最终得到当前记录的版本trx_id=2时，符合上述规则，所以此时查询得到的结果为：   
+name=A30,age=3
+
+2、当事务5执行第二次快照读的时候，得到的readview如下：
+
+![img_21.png](img_21.png)
+
+和上述的执行规则一样，同理符合上述规则的结果是，undolog 中版本trx_id=3的结果，所以此时查询得到的结果为：  
+name=A3,age=3
+
+### RR级别
+Repeatable Read隔离级别下，在仅仅在事务中第一次执行快照读时生成ReadView，后续复用该ReadView。
+
+![img_25.png](img_25.png)
+
+## 总结
+
+![img_26.png](img_26.png)
+
+
